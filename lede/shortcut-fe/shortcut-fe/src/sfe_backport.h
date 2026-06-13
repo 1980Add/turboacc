@@ -51,19 +51,19 @@ nf_ct_timeout_lookup(struct net *net, struct nf_conn *ct,
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0))
 #define sfe_define_post_routing_hook(FN_NAME, HOOKNUM, OPS, SKB, UNUSED, OUT, OKFN) \
-static unsigned int FN_NAME(void *priv, \
+static unsigned int __maybe_unused FN_NAME(void *priv, \
 			    struct sk_buff *SKB, \
 			    const struct nf_hook_state *state)
 #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0))
 #define sfe_define_post_routing_hook(FN_NAME, HOOKNUM, OPS, SKB, UNUSED, OUT, OKFN) \
-static unsigned int FN_NAME(const struct nf_hook_ops *OPS, \
+static unsigned int __maybe_unused FN_NAME(const struct nf_hook_ops *OPS, \
 			    struct sk_buff *SKB, \
 			    const struct net_device *UNUSED, \
 			    const struct net_device *OUT, \
 			    int (*OKFN)(struct sk_buff *))
 #else
 #define sfe_define_post_routing_hook(FN_NAME, HOOKNUM, OPS, SKB, UNUSED, OUT, OKFN) \
-static unsigned int FN_NAME(unsigned int HOOKNUM, \
+static unsigned int __maybe_unused FN_NAME(unsigned int HOOKNUM, \
 			    struct sk_buff *SKB, \
 			    const struct net_device *UNUSED, \
 			    const struct net_device *OUT, \

@@ -21,6 +21,7 @@
 #include <linux/icmp.h>
 #include <net/tcp.h>
 #include <linux/etherdevice.h>
+#include <linux/workqueue.h>
 #include <linux/version.h>
 
 #include "sfe.h"
@@ -408,7 +409,7 @@ struct sfe_ipv4 {
 	struct sfe_ipv4_connection *all_connections_tail;
 					/* Tail of the list of all connections */
 	unsigned int num_connections;	/* Number of connections */
-	struct timer_list timer;	/* Timer used for periodic sync ops */
+	struct delayed_work sync_work;	/* Timer used for periodic sync ops */
 	sfe_sync_rule_callback_t __rcu sync_rule_callback;
 					/* Callback function registered by a connection manager for stats syncing */
 	struct sfe_ipv4_connection *conn_hash[SFE_IPV4_CONNECTION_HASH_SIZE];
@@ -2859,9 +2860,10 @@ another_round:
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
 static void sfe_ipv4_periodic_sync(unsigned long arg)
 #else
-static void sfe_ipv4_periodic_sync(struct timer_list *tl)
+static void sfe_ipv4_periodic_sync(struct work_struct *work))
 #endif
 {
+	struct sfe_ipv4 *si = container_of(work, struct sfe_ipv4, sync_work.work);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
 	struct sfe_ipv4 *si = (struct sfe_ipv4 *)arg;
 #else
@@ -2955,10 +2957,6 @@ static void sfe_ipv4_periodic_sync(struct timer_list *tl)
 
 	spin_unlock_bh(&si->lock);
 	rcu_read_unlock();
-
-done:
-	mod_timer(&si->timer, jiffies + ((HZ + 99) / 100));
-}
 
 #define CHAR_DEV_MSG_SIZE 768
 
@@ -3545,12 +3543,8 @@ static int __init sfe_ipv4_init(void)
 	/*
 	 * Create a timer to handle periodic statistics.
 	 */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
-	setup_timer(&si->timer, sfe_ipv4_periodic_sync, (unsigned long)si);
-#else
-	timer_setup(&si->timer, sfe_ipv4_periodic_sync, 0);
-#endif
-	mod_timer(&si->timer, jiffies + ((HZ + 99) / 100));
+	INIT_DELAYED_WORK(&si->sync_work, sfe_ipv4_periodic_sync);
+	schedule_delayed_work(&si->sync_work, (HZ + 99) / 100);
 
 	spin_lock_init(&si->lock);
 
@@ -3585,7 +3579,7 @@ static void __exit sfe_ipv4_exit(void)
 	 */
 	sfe_ipv4_destroy_all_rules_for_dev(NULL);
 
-	del_timer_sync(&si->timer);
+	cancel_delayed_work_sync(&si->sync_work);
 
 	unregister_chrdev(si->debug_dev, "sfe_ipv4");
 

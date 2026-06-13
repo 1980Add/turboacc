@@ -21,9 +21,11 @@
 #include <linux/icmp.h>
 #include <net/tcp.h>
 #include <linux/etherdevice.h>
+#include <linux/workqueue.h>
 #include <linux/version.h>
 
 #include "sfe.h"
+#define SFE_SUPPORT_IPV6 1
 #include "sfe_cm.h"
 
 /*
@@ -435,7 +437,7 @@ struct sfe_ipv6 {
 	struct sfe_ipv6_connection *all_connections_tail;
 					/* Tail of the list of all connections */
 	unsigned int num_connections;	/* Number of connections */
-	struct timer_list timer;	/* Timer used for periodic sync ops */
+	struct delayed_work sync_work;	/* Delayed work for periodic sync ops */
 	sfe_sync_rule_callback_t __rcu sync_rule_callback;
 					/* Callback function registered by a connection manager for stats syncing */
 	struct sfe_ipv6_connection *conn_hash[SFE_IPV6_CONNECTION_HASH_SIZE];
@@ -2113,7 +2115,7 @@ static int sfe_ipv6_recv_icmp(struct sfe_ipv6 *si, struct sk_buff *skb, struct n
 		spin_lock_bh(&si->lock);
 		si->exception_events[SFE_IPV6_EXCEPTION_EVENT_ICMP_HEADER_INCOMPLETE]++;
 		si->packets_not_forwarded++;
-		spin_unlock_bh(&si->lock);
+		 spin_unlock_bh(&si->lock);
 
 		DEBUG_TRACE("packet too short for ICMP header\n");
 		return 0;
@@ -2864,17 +2866,9 @@ another_round:
 /*
  * sfe_ipv6_periodic_sync()
  */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
-static void sfe_ipv6_periodic_sync(unsigned long arg)
-#else
-static void sfe_ipv6_periodic_sync(struct timer_list *tl)
-#endif
+static void sfe_ipv6_periodic_sync(struct work_struct *work)
 {
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
-	struct sfe_ipv6 *si = (struct sfe_ipv6 *)arg;
-#else
-	struct sfe_ipv6 *si = from_timer(si, tl, timer);
-#endif
+	struct sfe_ipv6 *si = container_of(work, struct sfe_ipv6, sync_work.work);
 	u64 now_jiffies;
 	int quota;
 	sfe_sync_rule_callback_t sync_rule_callback;
@@ -2885,20 +2879,14 @@ static void sfe_ipv6_periodic_sync(struct timer_list *tl)
 	sync_rule_callback = rcu_dereference(si->sync_rule_callback);
 	if (!sync_rule_callback) {
 		rcu_read_unlock();
-		goto done;
+		goto reschedule;
 	}
 
 	spin_lock_bh(&si->lock);
 	sfe_ipv6_update_summary_stats(si);
 
-	/*
-	 * Get an estimate of the number of connections to parse in this sync.
-	 */
 	quota = (si->num_connections + 63) / 64;
 
-	/*
-	 * Walk the "active" list and sync the connection state.
-	 */
 	while (quota--) {
 		struct sfe_ipv6_connection_match *cm;
 		struct sfe_ipv6_connection_match *counter_cm;
@@ -2906,56 +2894,32 @@ static void sfe_ipv6_periodic_sync(struct timer_list *tl)
 		struct sfe_connection_sync sis;
 
 		cm = si->active_head;
-		if (!cm) {
+		if (!cm)
 			break;
-		}
 
-		/*
-		 * There's a possibility that our counter match is in the active list too.
-		 * If it is then remove it.
-		 */
 		counter_cm = cm->counter_match;
 		if (counter_cm->active) {
 			counter_cm->active = false;
-
-			/*
-			 * We must have a connection preceding this counter match
-			 * because that's the one that got us to this point, so we don't have
-			 * to worry about removing the head of the list.
-			 */
 			counter_cm->active_prev->active_next = counter_cm->active_next;
-
-			if (likely(counter_cm->active_next)) {
+			if (likely(counter_cm->active_next))
 				counter_cm->active_next->active_prev = counter_cm->active_prev;
-			} else {
+			else
 				si->active_tail = counter_cm->active_prev;
-			}
-
 			counter_cm->active_next = NULL;
 			counter_cm->active_prev = NULL;
 		}
 
-		/*
-		 * Now remove the head of the active scan list.
-		 */
 		cm->active = false;
 		si->active_head = cm->active_next;
-		if (likely(cm->active_next)) {
+		if (likely(cm->active_next))
 			cm->active_next->active_prev = NULL;
-		} else {
+		else
 			si->active_tail = NULL;
-		}
 		cm->active_next = NULL;
 
-		/*
-		 * Sync the connection state.
-		 */
 		c = cm->connection;
 		sfe_ipv6_gen_sync_connection(si, c, &sis, SFE_SYNC_REASON_STATS, now_jiffies);
 
-		/*
-		 * We don't want to be holding the lock when we sync!
-		 */
 		spin_unlock_bh(&si->lock);
 		sync_rule_callback(&sis);
 		spin_lock_bh(&si->lock);
@@ -2964,8 +2928,8 @@ static void sfe_ipv6_periodic_sync(struct timer_list *tl)
 	spin_unlock_bh(&si->lock);
 	rcu_read_unlock();
 
-done:
-	mod_timer(&si->timer, jiffies + ((HZ + 99) / 100));
+reschedule:
+	schedule_delayed_work(&si->sync_work, (HZ + 99) / 100);
 }
 
 /*
@@ -3553,12 +3517,8 @@ static int __init sfe_ipv6_init(void)
 	/*
 	 * Create a timer to handle periodic statistics.
 	 */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
-	setup_timer(&si->timer, sfe_ipv6_periodic_sync, (unsigned long)si);
-#else
-	timer_setup(&si->timer, sfe_ipv6_periodic_sync, 0);
-#endif
-	mod_timer(&si->timer, jiffies + ((HZ + 99) / 100));
+	INIT_DELAYED_WORK(&si->sync_work, sfe_ipv6_periodic_sync);
+	schedule_delayed_work(&si->sync_work, (HZ + 99) / 100);
 
 	spin_lock_init(&si->lock);
 
@@ -3593,7 +3553,7 @@ static void __exit sfe_ipv6_exit(void)
 	 */
 	sfe_ipv6_destroy_all_rules_for_dev(NULL);
 
-	del_timer_sync(&si->timer);
+	cancel_delayed_work_sync(&si->sync_work);
 
 	unregister_chrdev(si->debug_dev, "sfe_ipv6");
 
@@ -3622,4 +3582,3 @@ EXPORT_SYMBOL(sfe_ipv6_unregister_flow_cookie_cb);
 
 MODULE_DESCRIPTION("Shortcut Forwarding Engine - IPv6 support");
 MODULE_LICENSE("Dual BSD/GPL");
-

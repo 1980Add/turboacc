@@ -83,7 +83,7 @@ find_best_patch_dir() {
     echo "$best_dir"
 }
 
-git clone --depth=1 --single-branch https://github.com/mufeng05/turboacc "$TMPDIR/turboacc" || exit 1
+git clone --depth=1 --single-branch https://github.com/OldCoding/turboacc "$TMPDIR/turboacc" || exit 1
 
 mkdir -p "./package/turboacc"
 mkdir -p "./package/network/config/firewall/patches"
